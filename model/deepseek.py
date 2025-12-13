@@ -254,7 +254,9 @@ class DeepSeekV3(nn.Module):
         temperature=1.0,
         beam_size=8,
         length_penalty=1.0,
-        include_prompt=True
+        include_prompt=True,
+        valid_lens=None,
+        do_sample=False
     ):
         """
         Beam search generation with KV-caching.
@@ -287,7 +289,7 @@ class DeepSeekV3(nn.Module):
         # STEP 2: PROCESS PROMPT & GET INITIAL BEAMS
         # ============================================================
         # Forward pass through the model with the prompt
-        logits, _, kv_cache_memory = self.forward(prompt_tokens, cache=True, kv_cache=kv_cache_memory, valid_lens=None)  # Shape: (batch_size, prompt_len, vocab_size)
+        logits, _, kv_cache_memory = self.forward(prompt_tokens, cache=True, kv_cache=kv_cache_memory, valid_lens=valid_lens)  # Shape: (batch_size, prompt_len, vocab_size)
         
         # Get logits for the last token and apply temperature
         vocab_size = logits.size(-1)
@@ -297,7 +299,11 @@ class DeepSeekV3(nn.Module):
         probs = F.softmax(next_token_logits, dim=-1)  # Shape: (batch_size, vocab_size)
         
         # Get top-k (beam_size) initial tokens and their probabilities
-        init_scores, init_indices = torch.topk(probs, k=beam_size, dim=-1)  # Both: (batch_size, beam_size)
+        if not do_sample:
+            init_scores, init_indices = torch.topk(probs, k=beam_size, dim=-1)  # Both: (batch_size, beam_size)
+        else:
+            init_indices = torch.multinomial(probs, num_samples=beam_size)
+            init_scores = torch.gather(probs, dim=-1, index=init_indices)    
         
         # Convert probabilities to log probabilities for scores
         init_log_scores = torch.log(init_scores)  # Shape: (batch_size, beam_size)
@@ -550,7 +556,9 @@ class DeepSeekV3(nn.Module):
         pad_token_id=0, 
         temperature=1.0, 
         top_k_or_beam_size=None, 
-        include_prompt=True
+        include_prompt=True,
+        valid_lens=None,
+        do_sample=False
     ):
         if decode_strat == "beam":
             return self._beam_search(
@@ -560,7 +568,8 @@ class DeepSeekV3(nn.Module):
                 pad_token_id=pad_token_id,
                 temperature=temperature,
                 beam_size=top_k_or_beam_size,
-                include_prompt=include_prompt
+                include_prompt=include_prompt,
+                valid_lens=valid_lens
             )
         elif decode_strat == "top_k":
             return self._top_k_search(
@@ -570,7 +579,9 @@ class DeepSeekV3(nn.Module):
                 pad_token_id=pad_token_id,
                 temperature=temperature,
                 top_k=top_k_or_beam_size,
-                include_prompt=include_prompt
+                include_prompt=include_prompt,
+                valid_lens=valid_lens,
+                do_sample=do_sample
             )
         else:
             raise ValueError(f"Invalid decode strategy: {decode_strat}")

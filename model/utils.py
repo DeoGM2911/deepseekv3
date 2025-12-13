@@ -37,6 +37,7 @@ def rotary_emb(
     # Compute rotation angles
     theta = 10000 ** (-2 * torch.arange(0, x.size(-1), 2) / x.size(-1))
     m_theta = position.unsqueeze(-1) * theta  # (seq_len, head_dim/2)
+    m_theta = m_theta.view(1, x.size(1), 1, -1)
     
     # Apply rotation
     cos_m = torch.cos(m_theta)

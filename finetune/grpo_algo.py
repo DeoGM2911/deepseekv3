@@ -13,7 +13,7 @@ class GRPOLoss(nn.Module):
 
     def forward(self, advantages, model_probs, old_model_probs, ref_probs):
         # KL Divergence
-        ref_ratio = (model_probs / ref_probs).view(-1, self.num_output)  
+        ref_ratio = (ref_probs / model_probs).view(-1, self.num_output)  
         kl_loss = self.beta * torch.mean(torch.mean(ref_ratio - torch.log(ref_ratio) - 1, dim=1))
 
         # Policy gradient
@@ -116,7 +116,8 @@ class GRPO:
                                 temperature=1.0, 
                                 top_k_or_beam_size=8, 
                                 include_prompt=False,
-                                valid_lens=valid_lens
+                                valid_lens=valid_lens,
+                                do_sample=True
                 )
 
                 # Forward pass for old model

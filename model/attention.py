@@ -90,6 +90,10 @@ class MultiHeadLatentAttention(nn.Module):
         self.W_k = nn.Linear(latent_dim, self.num_heads * self.hidden_dim)
         self.W_v = nn.Linear(latent_dim, self.num_heads * self.hidden_dim)
         
+        # RoPE projection matrices
+        self.W_x_rope = nn.Linear(input_dim, self.num_heads * self.hidden_dim)
+        self.W_k_rope = nn.Linear(latent_dim, self.num_heads * self.hidden_dim)
+
         # Attention mechanism
         self.attention = ScaledDotProductAttention(dropout)
         
@@ -110,6 +114,7 @@ class MultiHeadLatentAttention(nn.Module):
         # If valid_lens is of shape batch_size, repeat to match the number of heads
         else:
             shape = scores.shape
+
             # Enforce 2D valid_lens for causal and padding masking
             assert valid_lens.dim() == 2, "valid_lens must be of shape (batch_size, seq_len)"
             # repeat num_heads time for each batch
@@ -121,6 +126,7 @@ class MultiHeadLatentAttention(nn.Module):
                 -1e4
             )
             return F.softmax(masked_scores.reshape(shape), dim=-1)
+            
     
     def forward(
         self,
@@ -138,13 +144,28 @@ class MultiHeadLatentAttention(nn.Module):
         batch_size, seq_len, kv_len = x.size(0), x.size(1), z.size(1)
         
         # Projection
-        query = self.W_q(x).view(batch_size, seq_len, self.num_heads, self.hidden_dim).transpose(1, 2)
-        key = self.W_k(z).view(batch_size, kv_len, self.num_heads, self.hidden_dim).transpose(1, 2)
-        value = self.W_v(z).view(batch_size, kv_len, self.num_heads, self.hidden_dim).transpose(1, 2)
+        query = self.W_q(x)  # (batch_size, seq_len, num_heads * head_dim)
+        key = self.W_k(z)  # (batch_size, kv_len, num_heads * head_dim)
+        value = self.W_v(z)  # (batch_size, kv_len, num_heads * head_dim)
         
         if self.use_rotary_emb:
-            query = rotary_emb(query, torch.arange(seq_len, device=query.device))
-            key = rotary_emb(key, torch.arange(kv_len, device=key.device))
+            x_rope = self.W_x_rope(x).view(batch_size, seq_len, self.num_heads, self.hidden_dim)
+            query_rope = rotary_emb(x_rope, torch.arange(seq_len, device=query.device))
+            z_rope = self.W_k_rope(z).view(batch_size, kv_len, self.num_heads, self.hidden_dim)
+            key_rope = rotary_emb(z_rope, torch.arange(kv_len, device=key.device))
+            
+            # Drop back to 3 dim
+            query_rope = query_rope.view(batch_size, seq_len, self.num_heads * self.hidden_dim)
+            key_rope = key_rope.view(batch_size, kv_len, self.num_heads * self.hidden_dim)
+
+            # Concat to get keys and queries along the head dimension
+            key = torch.concat([key, key_rope], dim=-1)
+            query = torch.concat([query, query_rope], dim=-1)
+        
+        # Reshape to separate heads: (batch_size, seq_len, num_heads, head_dim)
+        query = query.view(batch_size, seq_len, self.num_heads, -1).transpose(1, 2)
+        key = key.view(batch_size, kv_len, self.num_heads, -1).transpose(1, 2)
+        value = value.view(batch_size, kv_len, self.num_heads, self.hidden_dim).transpose(1, 2)
 
         # Compute attention for all heads at once
         attn_weights, scores = self.attention(query, key)
