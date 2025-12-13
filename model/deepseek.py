@@ -158,7 +158,8 @@ class DeepSeekV3(nn.Module):
         pad_token_id=0,
         temperature=1.0,
         top_k=None,
-        include_prompt=True
+        include_prompt=True,
+        valid_lens=None
     ):
         """
         Autoregressive generation with KV-caching
@@ -181,7 +182,7 @@ class DeepSeekV3(nn.Module):
         kv_cache_memory = None
         
         # Step 1: Process the ENTIRE prompt once
-        logits, _, kv_cache_memory = self.forward(prompt_tokens, cache=True)  # (batch, prompt_len, vocab_size)
+        logits, _, kv_cache_memory = self.forward(prompt_tokens, cache=True, valid_lens=valid_lens)  # (batch, prompt_len, vocab_size)
         
         # Get last token's logits for first generation
         next_token_logits = logits[:, -1, :] / temperature  # (batch, vocab_size)
@@ -532,12 +533,12 @@ class DeepSeekV3(nn.Module):
             final_scores = scores
         
         # Get best sequence for each batch
-        best_indices = final_scores.argmax(dim=1) # (batch, seq_len)
+        best_scores, best_indices = torch.max(final_scores, dim=1) # (batch, seq_len)
         best_sequences = sequences[torch.arange(batch_size), best_indices]
 
 
         # Return best sequences
-        return best_sequences
+        return best_sequences, best_scores
         
     
     def generate(
