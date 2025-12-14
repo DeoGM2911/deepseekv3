@@ -35,7 +35,6 @@ class DeepSeekV3(nn.Module):
         ffn_hidden_dim=1024,
         num_experts=16,
         router="centroid",
-        pos_enc="rotary",
         dropout=0.1
     ):
         super(DeepSeekV3, self).__init__()
@@ -44,15 +43,6 @@ class DeepSeekV3(nn.Module):
 
         # Embedding layer
         self.embedding = nn.Embedding(vocab_size, input_dim)
-        self.pos_enc_type = pos_enc
-
-        # Positional encoding (if not using rotary)
-        if pos_enc == "absolute":
-            self.pos_enc = PosEncoding(max_len, input_dim)
-        elif pos_enc == "learnable":
-            self.pos_enc = nn.Parameter(torch.zeros(1, max_len, input_dim))
-        else:
-            self.pos_enc = None
         
         # First 3 decoder blocks (or fewer if num_layers < 3) use normal FFN
         num_dense = min(3, num_layers)
@@ -65,7 +55,6 @@ class DeepSeekV3(nn.Module):
                 ffn_hidden_dim,
                 moe=False,
                 k=k,
-                rotary_enc=(pos_enc == "rotary"),
                 router=router,
                 dropout=dropout
             )
@@ -82,7 +71,6 @@ class DeepSeekV3(nn.Module):
                 ffn_hidden_dim,
                 moe=True,  # Use parameter
                 k=k,      # Use parameter
-                rotary_enc=(pos_enc == "rotary"),
                 router=router,  # Use parameter
                 dropout=dropout  # Use parameter
             )
@@ -91,25 +79,44 @@ class DeepSeekV3(nn.Module):
 
         # The answer head (LM head) - uses input_dim, not latent_dim
         self.answer_head = AnswerHead(input_dim, vocab_size)
-        
+    
+    def _fuse_q_projection(self):
+        """
+        Fuse all query projection matrices after training.
+
+        WARNING: ONLY CALL this after training during inference.
+        """
+        for block in self.decoder_blocks:
+            block.attention._fuse_q_projection()
+
     def forward(
         self,
         x,
         cache=False,
         kv_cache=None,
-        valid_lens=None
+        key_rope=None,
+        valid_lens=None,
+        inference=False
     ):
         # KV cache
         if cache:
             kv_cache_memory = []
+            key_rope_memory = []
         else:
             kv_cache_memory = None
+            key_rope_memory = None
         
         if kv_cache is None:
             kv_cache = [None] * self.num_layers
         else:
             # Unpack tensor to list for iteration
             kv_cache = list(kv_cache.unbind(dim=0))
+        
+        if key_rope is None:
+            key_rope = [None] * self.num_layers
+        else:
+            # Unpack tensor to list for iteration
+            key_rope = list(key_rope.unbind(dim=0))
         
         # MoE logits for auxilary loss
         moe_logits_list = []
@@ -118,37 +125,30 @@ class DeepSeekV3(nn.Module):
         # Embedding
         x = self.embedding(x)
 
-        # Apply positional encoding if needed
-        if self.pos_enc is not None:
-            if self.pos_enc_type == "learnable":
-                # For learnable embeddings, add them
-                seq_len = x.size(1)
-                x = x + self.pos_enc[:, :seq_len, :]
-            else:
-                # For absolute positional encoding
-                x = self.pos_enc(x)
-
         # Decoder blocks - capture all return values
         for i, block in enumerate(self.decoder_blocks):
-            x, _, _, moe_logits, moe_topk_indices, new_kv_cache = block(x, kv_cache[i], valid_lens)
+            x, _, _, moe_logits, moe_topk_indices, new_kv_cache, new_key_rope = block(x, kv_cache[i], key_rope[i], valid_lens, inference)
             
             if cache:
                 kv_cache_memory.append(new_kv_cache)
+                key_rope_memory.append(new_key_rope)
             
             moe_logits_list.append(moe_logits) if moe_logits is not None else None
             moe_topk_indices_list.append(moe_topk_indices) if moe_topk_indices is not None else None
         
         if cache and kv_cache_memory is not None:
             kv_cache_tensor = torch.stack(kv_cache_memory, dim=0)
+            key_rope_tensor = torch.stack(key_rope_memory, dim=0)
         else:
             kv_cache_tensor = None
+            key_rope_tensor = None
 
         # Stack the moe logits and indices
         moe_logits_list = torch.stack(moe_logits_list, dim=0) if moe_logits_list else None
         moe_topk_indices_list = torch.stack(moe_topk_indices_list, dim=0) if moe_topk_indices_list else None
 
         # Answer head
-        return self.answer_head(x), (moe_logits_list, moe_topk_indices_list), kv_cache_tensor
+        return self.answer_head(x), (moe_logits_list, moe_topk_indices_list), kv_cache_tensor, key_rope_tensor
     
     def _top_k_search(
         self,
@@ -159,7 +159,8 @@ class DeepSeekV3(nn.Module):
         temperature=1.0,
         top_k=None,
         include_prompt=True,
-        valid_lens=None
+        valid_lens=None,
+        inference=False
     ):
         """
         Autoregressive generation with KV-caching
@@ -180,9 +181,10 @@ class DeepSeekV3(nn.Module):
 
         # kv_cache
         kv_cache_memory = None
+        key_rope_memory = None
         
         # Step 1: Process the ENTIRE prompt once
-        logits, _, kv_cache_memory = self.forward(prompt_tokens, cache=True, valid_lens=valid_lens)  # (batch, prompt_len, vocab_size)
+        logits, _, kv_cache_memory, key_rope_memory = self.forward(prompt_tokens, cache=True, valid_lens=valid_lens, inference=inference)  # (batch, prompt_len, vocab_size)
         
         # Get last token's logits for first generation
         next_token_logits = logits[:, -1, :] / temperature  # (batch, vocab_size)
@@ -214,7 +216,14 @@ class DeepSeekV3(nn.Module):
             next_token_for_forward[complete] = pad_token_id
             
             # Process ONLY the last generated token (KV cache handles the rest!)
-            logits, _, kv_cache_memory = self.forward(next_token_for_forward, cache=True, kv_cache=kv_cache_memory, valid_lens=None)  # (batch, 1, vocab_size)
+            logits, _, kv_cache_memory, key_rope_memory = self.forward(
+                                                                next_token_for_forward, 
+                                                                cache=True, 
+                                                                kv_cache=kv_cache_memory, 
+                                                                key_rope=key_rope_memory, 
+                                                                valid_lens=None,
+                                                                inference=inference
+                                                            )  # (batch, 1, vocab_size)
             next_token_logits = logits[:, -1, :] / temperature  # (batch, vocab_size)
             
             # Optional top-k sampling
@@ -256,7 +265,8 @@ class DeepSeekV3(nn.Module):
         length_penalty=1.0,
         include_prompt=True,
         valid_lens=None,
-        do_sample=False
+        do_sample=False,
+        inference=False
     ):
         """
         Beam search generation with KV-caching.
@@ -284,12 +294,20 @@ class DeepSeekV3(nn.Module):
         
         # KV cache
         kv_cache_memory = None
+        key_rope_memory = None
         
         # ============================================================
         # STEP 2: PROCESS PROMPT & GET INITIAL BEAMS
         # ============================================================
         # Forward pass through the model with the prompt
-        logits, _, kv_cache_memory = self.forward(prompt_tokens, cache=True, kv_cache=kv_cache_memory, valid_lens=valid_lens)  # Shape: (batch_size, prompt_len, vocab_size)
+        logits, _, kv_cache_memory, key_rope_memory = self.forward(
+                                                            prompt_tokens, 
+                                                            cache=True, 
+                                                            kv_cache=kv_cache_memory, 
+                                                            key_rope=key_rope_memory, 
+                                                            valid_lens=valid_lens,
+                                                            inference=inference
+                                                        )  # Shape: (batch_size, prompt_len, vocab_size)
         
         # Get logits for the last token and apply temperature
         vocab_size = logits.size(-1)
@@ -337,20 +355,21 @@ class DeepSeekV3(nn.Module):
         
         # Expand KV caches for all beams
         kv_cache_memory = kv_cache_memory.unsqueeze(2).expand(-1, -1, beam_size, -1, -1)
+        key_rope_memory = key_rope_memory.unsqueeze(2).expand(-1, -1, beam_size, -1, -1)
+        
         # Now: (num_layers, batch_size, beam_size, seq_len, latent_dim)
         kv_cache_memory = kv_cache_memory.reshape(kv_cache_memory.size(0), batch_size * beam_size, -1, kv_cache_memory.size(-1))
+        key_rope_memory = key_rope_memory.reshape(key_rope_memory.size(0), batch_size * beam_size, -1, key_rope_memory.size(-1))
 
         # Initialize beam search state
         scores = init_log_scores
         complete = torch.zeros((batch_size, beam_size), dtype=torch.bool, device=device)
-        
         
         # ============================================================
         # STEP 4: PREPARE FOR GENERATION LOOP
         # ============================================================
         # Get the last token from each beam for next forward pass
         next_tokens = init_indices.view(batch_size * beam_size, 1)  # Shape: (batch_size * beam_size, 1)
-        
         
         
         # ============================================================
@@ -366,7 +385,6 @@ class DeepSeekV3(nn.Module):
             if complete.all():
                 break
             
-            
             # --------------------------------------------------------
             # 5.2: Forward pass for next token (skip completed beams)
             # --------------------------------------------------------
@@ -380,13 +398,16 @@ class DeepSeekV3(nn.Module):
                 
                 # Extract KV-cache for incomplete beams
                 active_kv_cache = kv_cache_memory[:, incomplete_mask, :, :]
+                active_key_rope = key_rope_memory[:, incomplete_mask, :, :]
                 
                 # Forward pass only for active beams
-                active_logits, _, active_kv_cache_new = self.forward(
+                active_logits, _, active_kv_cache_new, active_key_rope_new = self.forward(
                     active_tokens,
                     cache=True,
                     kv_cache=active_kv_cache, 
-                    valid_lens=None
+                    key_rope=active_key_rope,
+                    valid_lens=None,
+                    inference=inference
                 )  # Shape: (num_active_beams, 1, vocab_size)
                 
                 # Reconstruct full KV-cache (can't do in-place due to seq_len growth)
@@ -404,12 +425,23 @@ class DeepSeekV3(nn.Module):
                 # Copy updated caches for active beams
                 new_kv_cache_memory[:, incomplete_mask, :, :] = active_kv_cache_new
                 
+                new_key_rope_memory = torch.zeros(
+                    (num_layers, batch_size * beam_size, new_seq_len, latent_dim),
+                    dtype=kv_cache_memory.dtype,
+                    device=device
+                )
+                
+                # Copy updated caches for active beams
+                new_key_rope_memory[:, incomplete_mask, :, :] = active_key_rope_new
+
                 # For completed beams, copy old cache (pad with zeros for new seq_len)
                 if complete_flat.any():
                     old_seq_len = kv_cache_memory.size(2)
                     new_kv_cache_memory[:, complete_flat, :old_seq_len, :] = kv_cache_memory[:, complete_flat, :, :]
+                    new_key_rope_memory[:, complete_flat, :old_seq_len, :] = key_rope_memory[:, complete_flat, :, :]
                 
                 kv_cache_memory = new_kv_cache_memory
+                key_rope_memory = new_key_rope_memory
                 
                 # Create full logits tensor (fill completed beams with zeros, they won't be used)
                 logits = torch.zeros(
@@ -488,13 +520,17 @@ class DeepSeekV3(nn.Module):
             latent_dim = kv_cache_memory.size(3)
 
             reshaped_kv = kv_cache_memory.view(num_layers, batch_size, beam_size, seq_len, latent_dim)
+            reshaped_key_rope = key_rope_memory.view(num_layers, batch_size, beam_size, seq_len, latent_dim)
+            
             # Expand parent_beam_idx to match dimensions
             idx = parent_beam_idx.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)  # (1, batch, beam, 1, 1)
             idx = idx.expand(num_layers, -1, -1, seq_len, latent_dim)
             # Gather along beam dimension (dim=2)
             new_kv_cache_memory = torch.gather(reshaped_kv, 2, idx)
+            new_key_rope_memory = torch.gather(reshaped_key_rope, 2, idx)
             # Flatten back to (num_layers, batch*beam, seq_len, latent)
             kv_cache_memory = new_kv_cache_memory.view(num_layers, batch_size * beam_size, seq_len, latent_dim)
+            key_rope_memory = new_key_rope_memory.view(num_layers, batch_size * beam_size, seq_len, latent_dim)
 
 
             # --------------------------------------------------------
@@ -558,7 +594,8 @@ class DeepSeekV3(nn.Module):
         top_k_or_beam_size=None, 
         include_prompt=True,
         valid_lens=None,
-        do_sample=False
+        do_sample=False,
+        inference=False
     ):
         if decode_strat == "beam":
             return self._beam_search(
@@ -569,7 +606,8 @@ class DeepSeekV3(nn.Module):
                 temperature=temperature,
                 beam_size=top_k_or_beam_size,
                 include_prompt=include_prompt,
-                valid_lens=valid_lens
+                valid_lens=valid_lens,
+                inference=inference
             )
         elif decode_strat == "top_k":
             return self._top_k_search(
@@ -581,7 +619,8 @@ class DeepSeekV3(nn.Module):
                 top_k=top_k_or_beam_size,
                 include_prompt=include_prompt,
                 valid_lens=valid_lens,
-                do_sample=do_sample
+                do_sample=do_sample,
+                inference=inference
             )
         else:
             raise ValueError(f"Invalid decode strategy: {decode_strat}")
@@ -596,15 +635,16 @@ if __name__ == "__main__":
     deepseek = DeepSeekV3(
         vocab_size=len(dummy_vocab),
         input_dim=input_dim,
-        num_layers=4,
-        pos_enc="rotary"
+        num_layers=4
     )
     
+    deepseek._fuse_q_projection()
+
     # Test forward pass
     output = deepseek(dummy_input)
     print(f"Output shape: {output[0].shape}")  # Should be (2, 10, vocab_size)
     
     # Test generation
-    generated = deepseek.generate(dummy_input, max_new_tokens=5, top_k_or_beam_size=3)
+    generated = deepseek.generate(dummy_input, max_new_tokens=5, top_k_or_beam_size=3, inference=True)
     print(f"Generated: {generated}")
-    print(f"Generated shape: {generated.shape}")  # Should be (2, 15)
+    print(f"Generated shape: {generated[0].shape}")  # Should be (2, 15)

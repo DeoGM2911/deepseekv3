@@ -11,13 +11,13 @@ class GRPOLoss(nn.Module):
         self.beta = beta
         self.num_output = num_output
 
-    def forward(self, advantages, model_probs, old_model_probs, ref_probs):
+    def forward(self, advantages, model_log_probs, old_model_log_probs, ref_log_probs):
         # KL Divergence
-        ref_ratio = (ref_probs / model_probs).view(-1, self.num_output)  
-        kl_loss = self.beta * torch.mean(torch.mean(ref_ratio - torch.log(ref_ratio) - 1, dim=1))
+        ref_ratio = (torch.exp(ref_log_probs) - torch.exp(model_log_probs)).view(-1, self.num_output)  
+        kl_loss = self.beta * torch.mean(torch.mean(ref_ratio - (ref_log_probs - model_log_probs) - 1, dim=1))
 
         # Policy gradient
-        old_ratio = (model_probs / old_probs).view(-1, self.num_output)
+        old_ratio = (torch.exp(old_model_log_probs) / torch.exp(model_log_probs)).view(-1, self.num_output)
         pg_loss = torch.mean(torch.mean(advantages * old_ratio, dim=1))
 
         return -pg_loss + kl_loss  # Goal is to maximize
@@ -75,22 +75,23 @@ class GRPO:
         self.optimizer = optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.criterion = GRPOLoss(self.kl_beta, self.num_output)
 
-    def _get_probs(self, model, questions, outputs, valid_lens):
+    def _get_log_probs(self, model, questions, outputs, valid_lens):
         # For each token, compute the cumulative probability for the next token
         # Initial forward pass
-        logits, _, cache = model(questions, cache=True, valid_lens=valid_lens)
+        logits, _, kv_cache, key_rope_cache = model(questions, cache=True, valid_lens=valid_lens)
 
         # Get the cumulative probability for each token
         probs = torch.softmax(logits, dim=-1)
-        scores = torch.gather(probs, outputs[:, 0].view(probs.shape[0], -1), dim=-1)
+        scores = torch.log(torch.gather(probs, outputs[:, 0].view(probs.shape[0], -1), dim=-1))
 
         for i in range(1, outputs.shape[1]):
-            logits, _, cache = model(outputs[:, i-1].view(questions.shape[0], -1), cache=cache)
+            logits, _, kv_cache, key_rope_cache = model(outputs[:, i-1].view(questions.shape[0], -1), cache=True,
+                                                        kv_cache=kv_cache, key_rope_cache=key_rope_cache)
             probs = torch.softmax(logits, dim=-1)
             next_probs = torch.gather(probs, outputs[:, i].view(probs.shape[0], -1), dim=-1)
             # Times 1 if it's pad token
             next_probs[outputs[:, i] == self.vocab.pad_token_id] = 1
-            scores *= next_probs
+            scores += torch.log(next_probs)
 
         return scores
 
@@ -108,7 +109,7 @@ class GRPO:
                 questions = questions.repeat(self.num_output, 1)
 
                 # Forward pass to get outputs
-                outputs, probs = self.model.generate(questions,
+                outputs, log_probs = self.model.generate(questions,
                                 decode_strat="beam", 
                                 max_new_tokens=1_000, 
                                 eos_token_id=vocab.eos_token_id, 
@@ -122,11 +123,11 @@ class GRPO:
 
                 # Forward pass for old model
                 with torch.no_grad():
-                    old_probs = self._get_probs(self.old_model, questions, outputs, valid_lens)
+                    old_log_probs = self._get_log_probs(self.old_model, questions, outputs, valid_lens)
 
                 # Forward pass to get ref outputs
                 with torch.no_grad():
-                    ref_probs = self._get_probs(self.ref_model, questions, outputs, valid_lens)
+                    ref_log_probs = self._get_log_probs(self.ref_model, questions, outputs, valid_lens)
 
                 # Compute the rewards
                 with torch.no_grad():
@@ -137,7 +138,7 @@ class GRPO:
                 advantages = (rewards - rewards.mean(dim=1, keepdim=True)) / rewards.std(dim=1, keepdim=True)  # (batch_size, num_output)
 
                 # Compute the loss
-                loss = self.criterion(advantages, probs, old_probs, ref_probs)
+                loss = self.criterion(advantages, log_probs, old_log_probs, ref_log_probs)
                 
                 # Backward pass
                 loss.backward()

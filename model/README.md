@@ -32,6 +32,9 @@ There's also the implementation of RoPE position encoding, but this will be ment
 
 Other than that, the model uses pre-LayerNorm with residual connections.
 
+With this latent compression idea, we can also compress the query into the latent space, then up project it for attention. The goal is to pick the
+correct information to attend to.
+
 ### 2. Mixture of experts
 
 Besides MLA, DeepSeekV3 also implements Mixture of Experts (MoE). MoE is a technique that allows the model to learn how to distribute the load of computing the attention between different experts. Each expert is a simple feed-forward network.
@@ -52,6 +55,11 @@ One small exception is that DeepSeekV3 first 3 decoder blocks are implemented wi
 For DeepSeekV3, the positional encoding is implemented with RoPE (Rotary Position Embedding). In short, RoPE helps to encode the relative position of the tokens in the sequence. This is more semantically rich compared to absolute positional encoding since in most cases, the relative position is more important than the absolute position.
 
 One way to understand this is to imagine the token embeddings is rotated in there high-dimensional spaces by RoPE, and the angle between the token vectors will be the same as long as their relative position is the same.
+
+To implement this, there're two considerations:
+
+- query RoPE: We first perform a down projection, then we use this latent query in two ways: up project it to be our normal query and apply rope on a up-projected tensor from our latent query.
+- key RoPE: We first project our input into the latent space, then apply RoPE. Then it's concat to the key (up-projection of KV-cache). Note that, we also need to cache out key RoPE for concatenating with the KV-cache at the next step.
 
 ## II. Implementation
 
