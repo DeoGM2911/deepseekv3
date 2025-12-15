@@ -19,10 +19,11 @@ class DecoderBlock(nn.Module):
         moe=True,
         k=1,
         router="centroid",
+        mode="MHA",
         dropout=0.1
     ):
         super(DecoderBlock, self).__init__()
-        self.attention = MultiHeadLatentAttention(input_dim, latent_dim, num_heads, dropout)
+        self.attention = MultiHeadLatentAttention(input_dim, latent_dim, num_heads, dropout, mode)
         if moe:
             self.moe = MixtureOfExperts(input_dim, input_dim, num_experts, ffn_hidden_dim, k, router, dropout)
         else:
@@ -35,14 +36,14 @@ class DecoderBlock(nn.Module):
         x,
         z=None,
         key_rope=None,
-        valid_lens=None,
+        attention_mask=None,
         inference=False
     ):
         # Norm
         x_norm = self.add_norm1(x)
 
         # Self-attention
-        attn_output, new_z, new_key_rope, attn_weights, scores = self.attention(x_norm, z, key_rope, valid_lens, inference)
+        attn_output, new_z, new_key_rope, attn_weights, scores = self.attention(x_norm, z, key_rope, attention_mask, inference)
         # Add residual connection
         x = x + attn_output
         # Norm
@@ -59,10 +60,46 @@ class DecoderBlock(nn.Module):
 if __name__ == "__main__":
     blk = DecoderBlock(8, 16, 2, 2, 16)
     x = torch.randn(2, 3, 8)
-    z = torch.randn(2, 2, 16)
-    key_rope = torch.randn(2, 2, 16)
-    valid_lens = torch.tensor([[0, 1, 2], [0, 1, 2]])
-    output, attn_weights, scores, moe_logits, moe_topk_indices, new_z, new_key_rope = blk(x, z, key_rope, valid_lens)
+    attention_mask = torch.tensor([[1, 1, 0], [1, 0, 0]])
+    print("Test 1")
+    output, attn_weights, scores, moe_logits, moe_topk_indices, new_z, new_key_rope = blk(x, None, None, None, inference=False)
+    print(output.shape)
+    print(attn_weights.shape)
+    print(scores.shape)
+    print(moe_logits.shape)
+    print(moe_topk_indices.shape)
+    print(new_z.shape)
+    print(new_key_rope.shape)
+
+    x = torch.randn(2, 1, 8)
+    attention_mask = torch.tensor([[1, 1, 0, 1], [1, 0, 0, 1]])
+    print("Test 2")
+    output, attn_weights, scores, moe_logits, moe_topk_indices, new_z, new_key_rope = blk(x, new_z, new_key_rope, attention_mask, inference=True)
+    print(output.shape)
+    print(attn_weights.shape)
+    print(scores.shape)
+    print(moe_logits.shape)
+    print(moe_topk_indices.shape)
+    print(new_z.shape)
+    print(new_key_rope.shape)
+
+    blk = DecoderBlock(8, 16, 2, 2, 16, mode="MQA")
+    x = torch.randn(2, 3, 8)
+    attention_mask = torch.tensor([[1, 1, 0], [1, 0, 0]])
+    print("Test 3")
+    output, attn_weights, scores, moe_logits, moe_topk_indices, new_z, new_key_rope = blk(x, None, None, None, inference=False)
+    print(output.shape)
+    print(attn_weights.shape)
+    print(scores.shape)
+    print(moe_logits.shape)
+    print(moe_topk_indices.shape)
+    print(new_z.shape)
+    print(new_key_rope.shape)
+
+    x = torch.randn(2, 1, 8)
+    attention_mask = torch.tensor([[1, 1, 0, 1], [1, 0, 0, 1]])
+    print("Test 4")
+    output, attn_weights, scores, moe_logits, moe_topk_indices, new_z, new_key_rope = blk(x, new_z, new_key_rope, attention_mask, inference=True)
     print(output.shape)
     print(attn_weights.shape)
     print(scores.shape)
