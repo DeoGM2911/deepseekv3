@@ -1,3 +1,5 @@
+This code is written when I first try to just read the paper and there are some part that is incorrect due to misunderstanding. The correct implementation and documentation is sotred under the other deepseekv3.2 directory.
+
 # DeepSeekV3 Architecture Reconstruction Project
 
 This project aims to reconstruct the DeepSeekV3 architecture based on my understanding of the papers. This repo is for learning purposes only.

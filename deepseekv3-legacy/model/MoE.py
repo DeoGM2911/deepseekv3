@@ -9,8 +9,6 @@ class SwiGLU(nn.Module):
     
     SwiGLU(x) = SiLU(xW_gate) ⊗ (xW_value)
     where SiLU(x) = x * sigmoid(x) (also known as Swish)
-    
-    This is used in modern LLMs like LLaMA, PaLM, and DeepSeek V3.
     """
     def __init__(
         self,

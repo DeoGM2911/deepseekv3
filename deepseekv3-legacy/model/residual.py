@@ -3,7 +3,7 @@ import torch.nn as nn
 
 
 class AddNorm(nn.Module):
-    r"""
+    """
     Residual connection followed by layer normalization.
     
     This module adds the input tensor to the output of a sub-layer (residual connection)

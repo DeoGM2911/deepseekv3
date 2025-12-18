@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .utils import PosEncoding
-from .transformer_decoder import DecoderBlock
+from .decoder import DecoderBlock
 
 
 class DeepSeekV3Config:
@@ -22,6 +22,9 @@ class DeepSeekV3Config:
     dropout=0.1
     mode_switch=30
     num_ffn=3
+    indexer_num_heads=16
+    indexer_dim=32
+    indexer_k=16
 
 
 class AnswerHead(nn.Module):
@@ -107,6 +110,10 @@ class DeepSeekV3(nn.Module):
                 num_experts,
                 ffn_hidden_dim,
                 moe=False,
+                use_indexer=True,
+                indexer_num_heads=16,
+                indexer_dim=32,
+                indexer_k=16,
                 k=k,
                 router=router,
                 dropout=dropout,
@@ -124,6 +131,10 @@ class DeepSeekV3(nn.Module):
                 num_experts,
                 ffn_hidden_dim,
                 moe=True,  # Use parameter
+                use_indexer=True,
+                indexer_num_heads=16,
+                indexer_dim=32,
+                indexer_k=16,
                 k=k,      # Use parameter
                 router=router,  # Use parameter
                 dropout=dropout,  # Use parameter

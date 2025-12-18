@@ -6,7 +6,7 @@ from .utils import rotary_emb
 
 
 class ScaledDotProductAttention(nn.Module):
-    r"""
+    """
     The scaled dot-product attention mechanism.
     
     Given a query matrix Q and a key matrix K, this module computes the attention scores
@@ -16,9 +16,9 @@ class ScaledDotProductAttention(nn.Module):
 
     Note that, this attention mechanism is **NOT** masked!
     
-    \[
-        \operatorname{softmax}\bigg(\dfrac{QK^T}{\sqrt{d_k}}\bigg)
-    \]
+    \\[
+        \\operatorname{softmax}\\bigg(\\dfrac{QK^T}{\\sqrt{d_k}}\\bigg)
+    \\]
     """
     def __init__(
         self,
@@ -39,7 +39,7 @@ class ScaledDotProductAttention(nn.Module):
         mask = torch.arange(shape[-1], device=scores.device)
         
         masked_scores = scores.masked_fill(
-            (mask.unsqueeze(0) > mask.unsqueeze(1)).unsqueeze(0).unsqueeze(0),  # (batch_size, num_heads, num_queries, num_keys)
+            (mask.unsqueeze(0) > mask.unsqueeze(1)).unsqueeze(0).unsqueeze(0),  # (1, 1, num_queries, num_keys)
             -1e6
         )
 
@@ -80,22 +80,92 @@ class Indexer(nn.Module):
     to compute the scores. The scores are then weighted by the weight vector and we sum everything up to get our score.
     Based on that score, we'll choose top-k tokens to attend to.
     
-    In essence, the indexer acts like a light-weight attention mechanism.
+    In essence, the indexer acts like a light-weight attention mechanism. Also, we'll quantize the
+    values to fp8, which help reduce the memory usage.
     """
     def __init__(
-        self
-    ):
+        self,
+        input_dim,
+        latent_dim,
+        indexer_dim,
+        indexer_num_heads,
+        k=3
+    ):  
+        assert indexer_dim >= 4, "Indexer dim must be greater than or equal to 4"
         super(Indexer, self).__init__()
-    
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        self.indexer_dim = indexer_dim
+        self.indexer_num_heads = indexer_num_heads
+        self.k = k
+
+        # Projection layer
+        self.query = nn.Linear(input_dim, indexer_num_heads * indexer_dim)
+        self.key = nn.Linear(latent_dim, indexer_dim)
+        self.weights = nn.Linear(input_dim, indexer_num_heads)
+
+    def _causal_mask(
+        self,
+        scores
+    ):
+        """
+        Apply causal mask to the key-value representation 
+        to avoid attending to future tokens.
+        """
+        _, seq_len, kv_len = scores.shape
+        min_val = torch.min(scores)
+        kv_mask = torch.arange(kv_len, device=scores.device)
+        seq_mask = torch.arange(seq_len, device=scores.device)
+        
+        masked_scores = scores.masked_fill(
+            (kv_mask.unsqueeze(0) > seq_mask.unsqueeze(1)).unsqueeze(0),  # (1, seq_len, kv_len)
+            float("-inf")
+        )
+
+        return masked_scores
+        
     def forward(
         self,
-        x
+        x,
+        z,
+        inference=False
     ):
-        return ...
+        batch_size, seq_len, _ = x.shape
+        kv_len = z.shape[1]
+        rope_dim = self.indexer_dim // 2
+        # Poject to latent dim
+        query = self.query(x).view(batch_size, seq_len, self.indexer_num_heads, self.indexer_dim)
+        key = self.key(z).view(batch_size, kv_len, 1, self.indexer_dim)
+        
+        # Compute weights
+        weights = self.weights(x)  # (batch_size, seq_len, indexer_num_heads)
+
+        # Partial RoPE
+        query_a, query_b = torch.split(query, rope_dim, dim=-1)
+        key_a, key_b = torch.split(key, rope_dim, dim=-1)
+
+        query_rope = rotary_emb(query_b, torch.arange(seq_len, device=query.device))
+        key_rope = rotary_emb(key_b, torch.arange(kv_len, device=key.device))
+
+        # Reconcatenate
+        query = torch.cat([query_a, query_rope], dim=-1).view(batch_size, seq_len, 1, self.indexer_num_heads, self.indexer_dim)
+        key = torch.cat([key_a, key_rope], dim=-1).view(batch_size, 1, kv_len, 1, self.indexer_dim)
+        
+        # Compute dot product
+        scores = F.relu((query * key).sum(dim=-1))
+        scores = (weights.view(batch_size, seq_len, 1, self.indexer_num_heads) * scores).sum(dim=-1)  # (B, seq_len, kv_len)
+        
+        # Apply causal mask
+        if not inference:
+            scores = self._causal_mask(scores)
+
+        # Return top-k tokens (pick all if kv_len < k)
+        top_k = torch.topk(scores, k=min(self.k, kv_len), dim=-1)
+        return scores, top_k.values, top_k.indices
 
 
 class MultiHeadLatentAttention(nn.Module):
-    r"""
+    """
     Multi-head latent attention mechanism. The same as multi-head attention but introduce a latent representation
     for the keys and values. Save space by using latent representations across all heads during inference.
 
@@ -127,6 +197,10 @@ class MultiHeadLatentAttention(nn.Module):
         input_dim,
         latent_dim,
         num_heads,
+        use_indexer=True,
+        indexer_num_heads=8,
+        indexer_dim=64,
+        indexer_k=4,
         dropout=0.1,
         mode="MHA"
     ):
@@ -135,6 +209,17 @@ class MultiHeadLatentAttention(nn.Module):
         self.hidden_dim = latent_dim // num_heads
         assert mode in ["MHA", "MQA"], "Only two modes are allowed: \"MHA\" or \"MQA\""
         self.mode = mode
+
+        # Only use DSA indexer if mode is MQA
+        self.use_indexer = (use_indexer and mode == "MQA")
+
+        if self.use_indexer:
+            self.indexer = Indexer(
+                indexer_num_heads,
+                indexer_dim,
+                indexer_k,
+                dropout
+            )
 
         # Decide how to project the kv-cache
         self.num_kv = self.num_heads if self.mode == "MHA" else 1
@@ -212,9 +297,17 @@ class MultiHeadLatentAttention(nn.Module):
         else:
             query = self.W_q_up(query_latent)
         
+        if self.use_indexer:
+            sparse_idx = self.indexer(x, z, inference=inference)  # (batch_size, seq_len, kv_len)
+        
         key = self.W_k_up(z)  # (batch_size, kv_len, num_heads * head_dim)
         value = self.W_v_up(z)  # (batch_size, kv_len, num_heads * head_dim)        
         
+        # Only pick keys and values for the chosen indices for each query
+        if self.use_indexer:
+            key = torch.gather(key, 1, sparse_idx.unsqueeze(-1).expand(-1, -1, -1, self.hidden_dim))
+            value = torch.gather(value, 1, sparse_idx.unsqueeze(-1).expand(-1, -1, -1, self.hidden_dim))
+
         x_rope = self.W_x_rope(query_latent).view(batch_size, seq_len, self.num_heads, self.hidden_dim)
         query_rope = rotary_emb(x_rope, torch.arange(seq_len, device=query_latent.device))
         
@@ -296,3 +389,20 @@ if __name__ == "__main__":
     print(output_2.shape)
     print(attn_weights_2.shape)
     print(scores_2.shape)
+
+    # Test indexer
+    indexer = Indexer(8, 16, 8, 2)
+    x = torch.ones((1, 3, 8))
+    z = torch.ones((1, 3, 16))
+    x2 = torch.ones((1, 1, 8))
+    scores, values, indices = indexer(x, z)  
+    print("test 5")
+    print(scores)
+    print(values.shape)
+    print(indices.shape)
+    
+    scores_2, values_2, indices_2 = indexer(x2, z, inference=True)  
+    print("test 6")
+    print(scores_2.shape)
+    print(values_2.shape)
+    print(indices_2.shape)

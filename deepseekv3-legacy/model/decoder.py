@@ -18,12 +18,26 @@ class DecoderBlock(nn.Module):
         ffn_hidden_dim,
         moe=True,
         k=1,
+        use_indexer=True,
+        indexer_num_heads=8,
+        indexer_dim=64,
+        indexer_k=4,
         router="centroid",
         mode="MHA",
         dropout=0.1
     ):
         super(DecoderBlock, self).__init__()
-        self.attention = MultiHeadLatentAttention(input_dim, latent_dim, num_heads, dropout, mode)
+        self.attention = MultiHeadLatentAttention(
+                                input_dim,
+                                latent_dim,
+                                num_heads,
+                                use_indexer,
+                                indexer_num_heads,
+                                indexer_dim,
+                                indexer_k,
+                                dropout,
+                                mode
+                            )
         if moe:
             self.moe = MixtureOfExperts(input_dim, input_dim, num_experts, ffn_hidden_dim, k, router, dropout)
         else:
