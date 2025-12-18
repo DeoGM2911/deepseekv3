@@ -1,7 +1,7 @@
 import torch
 from torch import nn
-from attention import MLA
-from moe import MoE
+from .attention import MLA
+from .moe import MoE, MLP
 
 
 class Decoder(nn.Module):
@@ -9,6 +9,12 @@ class Decoder(nn.Module):
     The decoder in DeepSeek v3.2.
     A decoder block consists of a MLA layer, a MoE layer, and 
     2 residual pre-layer norm connection.
+
+    ## Global Param
+
+    @Args:
+        block_idx: the index of the block
+        num_dense_layers: the total number of layers with dense MLP blocks.
 
     ## MLA params:
     
@@ -38,6 +44,8 @@ class Decoder(nn.Module):
     """
     def __init__(
         self,
+        block_idx,
+        num_dense_layers,
         input_dim,
         kv_lora_dim,
         q_lora_dim,
@@ -55,9 +63,12 @@ class Decoder(nn.Module):
         moe_num_experts,
         moe_k,
         moe_router,
-        moe_dropout    
+        moe_dropout
     ):
         super(Decoder, self).__init__()
+        self.block_idx = block_idx
+        self.use_moe = self.block_idx >= num_dense_layers
+
         # MLA layer
         self.mla = MLA(
             input_dim,
@@ -75,16 +86,19 @@ class Decoder(nn.Module):
         )
 
         # MoE layer
-        self.moe = MoE(
-            input_dim,
-            moe_hidden_dim,
-            input_dim,
-            moe_num_shared_experts,
-            moe_num_experts,
-            moe_k,
-            moe_router,
-            moe_dropout
-        )
+        if self.use_moe:
+            self.moe = MoE(
+                input_dim,
+                moe_hidden_dim,
+                input_dim,
+                moe_num_shared_experts,
+                moe_num_experts,
+                moe_k,
+                moe_router,
+                moe_dropout
+            )
+        else:
+            self.moe = MLP(input_dim, moe_hidden_dim, input_dim)
 
         # Residual pre-Layer Norm
         self.ln1 = nn.LayerNorm(input_dim)
@@ -108,7 +122,11 @@ class Decoder(nn.Module):
         # Pre-layer norm
         x_norm = self.ln2(x)
         # MoE
-        x_moe, gate_logits, topk_indices = self.moe(x_norm)        
+        if self.use_moe:
+            x_moe, gate_logits, topk_indices = self.moe(x_norm)        
+        else:
+            x_moe = self.moe(x_norm)
+            gate_logits, topk_indices = None, None
         # Residual connection
         x = x_norm + x_moe
 

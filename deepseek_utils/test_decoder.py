@@ -4,6 +4,8 @@ from decoder import Decoder
 
 def test_decoder():
     decoder = Decoder(
+        block_idx=0,  # Change this to 3 to test with MoE instead of MLP
+        num_dense_layers=2,
         input_dim=4,
         kv_lora_dim=8,
         q_lora_dim=4,

@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 import math
-from utils import rotary_emb, pre_compute_theta
+from .utils import rotary_emb, pre_compute_theta
 
 
 class ScaledDotProductAttention(nn.Module):
@@ -85,6 +85,7 @@ class Indexer(nn.Module):
         max_len
     ):
         super(Indexer, self).__init__()
+        assert head_dim > rope_dim, f"Indexer head dim should be greater than rope dim! Got head_dim={head_dim} and rope_dim={rope_dim}"
         self.input_dim = input_dim
         self.kv_lora_dim = kv_lora_dim
         self.num_heads = num_heads
