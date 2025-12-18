@@ -112,8 +112,8 @@ class Indexer(nn.Module):
         self,
         x,
         kv,
-        mask=None,
-        k_idx=None  # cache for k_idx,
+        k_idx=None,  # cache for k_idx
+        mask=None
     ):
         """
         Compute the relevant scores to decide which keys/values should the attention mechanism
@@ -121,7 +121,8 @@ class Indexer(nn.Module):
         
         Args:
             x: Query matrix of shape (B, H, T, D)
-            kv: KV-lora matrix of shape (B, H, T, D)
+            kv: KV-lora matrix of shape (B, H, T, D) where T is the seq_len when training and T=1 during inference.
+            That is kv should be the kv-cache of the input x
             mask: The mask for the indexer. Should be the mask that will be use in the attention mechanism.
                     Should be of shape (B, T, KV_len) in training.
             k_idx: Cache for k_idx. Should be None for training or at first inference call.
@@ -132,12 +133,7 @@ class Indexer(nn.Module):
         batch_size, seq_len, _ = x.shape
 
         # Compute the keys for the indexer. Cache if needed
-        if k_idx is None:
-            k_idx = self.k_norm(self.Wk_idx(kv))
-        else:
-            k_idx = torch.cat([k_idx, self.k_norm(self.Wk_idx(kv))], dim=1)
-        
-        kv_len = k_idx.shape[1]
+        k = self.k_norm(self.Wk_idx(kv))
 
         # Compute the queries for the indexer
         q_idx = self.q_norm(self.Wq_idx(x))
@@ -146,20 +142,27 @@ class Indexer(nn.Module):
         w_idx = self.w_norm(self.W_weights(x))
 
         # Apply rope for keys and queries
-        k_nope, k_rope = k_idx.split([self.rope_dim, self.head_dim-self.rope_dim], dim=-1)
-        q_nope, q_rope = q_idx.split([self.num_heads * self.rope_dim, self.num_heads * (self.head_dim-self.rope_dim)], dim=-1)
+        k_nope, k_rope = k.split([self.head_dim-self.rope_dim, self.rope_dim], dim=-1)
+        q_nope, q_rope = q_idx.split([self.num_heads * (self.head_dim-self.rope_dim), self.num_heads * self.rope_dim], dim=-1)
 
         # Apply RoPE
         q_rope = q_rope.view(batch_size, seq_len, self.num_heads, self.rope_dim)
-        k_rope = k_rope.view(batch_size, kv_len, 1, self.rope_dim)
+        k_rope = k_rope.view(batch_size, -1, 1, self.rope_dim)
         k_rope = rotary_emb(k_rope, self.theta)
         q_rope = rotary_emb(q_rope, self.theta)
 
-        # Reconcat
-        k_idx = torch.cat([k_nope.view(batch_size, kv_len, 1, self.head_dim-self.rope_dim), k_rope], dim=-1)
+        # Reconcat and cache
+        k = torch.cat([k_nope.view(batch_size, -1, 1, self.head_dim-self.rope_dim), k_rope], dim=-1)
+        k = k.view(batch_size, -1, self.head_dim)
+        if k_idx is None:
+            k_idx = k
+        else:
+            k_idx = torch.cat([k_idx, k], dim=1)
+
         q_idx = torch.cat([q_nope.view(batch_size, seq_len, self.num_heads, self.head_dim-self.rope_dim), q_rope], dim=-1)
 
         # Reshape for the similarity scores
+        kv_len = k_idx.shape[1]
         k_idx = k_idx.view(batch_size, 1, 1, kv_len, -1)
         q_idx = q_idx.view(batch_size, seq_len, self.num_heads, 1, -1)
         w_idx = w_idx.view(batch_size, seq_len, self.num_heads, 1)
@@ -174,6 +177,9 @@ class Indexer(nn.Module):
         
         # Choose top-k keys/values
         top_scores, top_indices = idx_scores.topk(min(self.k, kv_len), dim=-1)
+
+        # Reshape k_idx for caching
+        k_idx = k_idx.view(batch_size, kv_len, -1)
         return top_indices, idx_scores, k_idx
 
 
@@ -187,11 +193,12 @@ class MLA(nn.Module):
         kv_lora_dim,
         q_lora_dim,
         qk_rope_dim,
-        qk_head_dim,
+        qk_nope_head_dim,
         v_head_dim,
         num_heads,
         indexer_num_heads,
         indexer_head_dim,
+        indexer_rope_dim,
         indexer_k,
         max_len
     ):
@@ -201,29 +208,31 @@ class MLA(nn.Module):
         self.kv_lora_dim = kv_lora_dim
         self.q_lora_dim = q_lora_dim
         self.qk_rope_dim = qk_rope_dim
-        self.qk_head_dim = qk_head_dim
+        self.qk_nope_head_dim = qk_nope_head_dim
         self.v_head_dim = v_head_dim
         self.num_heads = num_heads
         self.indexer_num_heads = indexer_num_heads
         self.indexer_head_dim = indexer_head_dim
+        self.indexer_rope_dim = indexer_rope_dim
         self.indexer_k = indexer_k
+        self.max_len = max_len
 
         # Down projection matrices
         self.Wq_a = nn.Linear(self.input_dim, self.q_lora_dim)
-        self.Wkv_a = nn.Linear(self.input_dim, self.kv_lora_dim + self.num_heads * self.qk_rope_dim)
+        self.Wkv_a = nn.Linear(self.input_dim, self.kv_lora_dim + self.qk_rope_dim)
 
         # Norm layers
-        self.q_norm = nn.LayerNorm(self.num_heads * (self.qk_head_dim + self.qk_rope_dim))
-        self.kv_norm = nn.LayerNorm(self.kv_lora_dim + self.num_heads * self.qk_rope_dim)
-        self.k_norm = nn.LayerNorm(self.qk_head_dim)
+        self.q_norm = nn.LayerNorm(self.num_heads * (self.qk_nope_head_dim + self.qk_rope_dim))
+        self.kv_norm = nn.LayerNorm(self.kv_lora_dim + self.qk_rope_dim)
+        self.k_norm = nn.LayerNorm(self.qk_nope_head_dim)
         self.v_norm = nn.LayerNorm(self.v_head_dim)
 
         # Up projection matrices
-        self.Wq_b = nn.Linear(self.q_lora_dim, self.num_heads * (self.qk_head_dim + self.qk_rope_dim))
-        self.Wkv_b = nn.Linear(self.kv_lora_dim, self.num_heads * (self.qk_head_dim + self.v_head_dim))
+        self.Wq_b = nn.Linear(self.q_lora_dim, self.num_heads * (self.qk_nope_head_dim + self.qk_rope_dim))
+        self.Wkv_b = nn.Linear(self.kv_lora_dim, self.num_heads * (self.qk_nope_head_dim + self.v_head_dim))
         
         # Precompute the theta angle for RoPE 
-        self.m_theta = pre_compute_theta(max_len, self.qk_rope_dim)
+        self.m_theta = pre_compute_theta(self.max_len, self.qk_rope_dim)
 
         # Indexer
         self.indexer = Indexer(
@@ -231,19 +240,24 @@ class MLA(nn.Module):
             kv_lora_dim=self.kv_lora_dim,
             num_heads=self.indexer_num_heads,
             head_dim=self.indexer_head_dim,
-            k=self.indexer_k
+            rope_dim=self.indexer_rope_dim,
+            k=self.indexer_k,
+            max_len=max_len
         )
 
+        # Attention module
+        self.attention = ScaledDotProductAttention()
+
         # Output projection matrix
-        self.W_o = nn.Linear(self.v_head_dim, self.input_dim)
+        self.W_o = nn.Linear(self.num_heads * self.v_head_dim, self.input_dim)
     
     def forward(
         self,
         x,
-        kv_cache=None,
+        kv=None,
         k_rope=None,
-        mask=None,
-        k_idx=None
+        k_idx=None,
+        mask=None
     ):
         """
         Perform the DSA-MLA attention. There are 2 modes:
@@ -252,23 +266,105 @@ class MLA(nn.Module):
 
         @Args:
             x: the input tensor
-            kv_cache: the cache for kv latent
+            kv: the cache for kv latent
             k_rope: the cache for key rope projection
             mask: the mask for the attention mechanism
             k_idx: the cache for indexer's keys
         """
+        batch_size, seq_len, _ = x.shape
+
         # Compute the kv latent & key rope projection. Cache if needed
-        cache = self.kv_norm(self.Wkv_a(x)) 
-        if kv_cache is None:
-            kv_cache, k_rope = cache.split([self.kv_lora_dim, self.num_heads * self.qk_rope_dim], dim=-1)
+        z = self.kv_norm(self.Wkv_a(x)) 
+        new_kv = None
+        rope = None
+        if kv is None:
+            new_kv, rope = z.split([self.kv_lora_dim, self.qk_rope_dim], dim=-1)
+            kv = new_kv
         else:
-            cache, rope = kv_cache.split([self.kv_lora_dim, self.num_heads * self.qk_rope_dim], dim=-1)
-            kv_cache = torch.cat([kv_cache, cache], dim=1)
-            k_rope = torch.cat([k_rope, rope], dim=1)
+            new_kv, rope = z.split([self.kv_lora_dim, self.qk_rope_dim], dim=-1)
+            kv = torch.cat([kv, new_kv], dim=1)
+        
+        kv_len = kv.shape[1]
         
         # Compute the queries for the attention mechanism
         q = self.Wq_a(x)
         q = self.q_norm(self.Wq_b(q))
-        q_nope, q_rope = q.split([self.num_heads * self.qk_head_dim, self.num_heads * self.qk_rope_dim], dim=-1)
+        q_nope, q_rope = q.split([self.num_heads * self.qk_nope_head_dim, self.num_heads * self.qk_rope_dim], dim=-1)
+        q_nope = q_nope.contiguous().view(batch_size, self.num_heads, seq_len, self.qk_nope_head_dim)
 
-        ...
+        # Apply RoPE to q_rope and k_rope. Reshape appropriately
+        q_rope = q_rope.contiguous().view(batch_size, self.num_heads, seq_len, self.qk_rope_dim)
+        rope = rope.contiguous().view(batch_size, 1, seq_len, self.qk_rope_dim)
+        q_rope = rotary_emb(q_rope, self.m_theta)
+        rope = rotary_emb(rope, self.m_theta)
+
+        # Cache the RoPE keys and reshape for attention
+        if k_rope is None:
+            k_rope = rope
+        else:
+            k_rope = torch.cat([k_rope, rope.contiguous().view(batch_size, seq_len, self.qk_rope_dim)], dim=1)
+            k_rope = k_rope.contiguous().view(batch_size, 1, kv_len, self.qk_rope_dim)
+        
+        # Variables meant to be returned
+        kv_mask = None
+        attn_weights = None
+        
+        # MHA mode: Prefill/Training. Expect a mask to be provided. Here, seq_len = kv_len
+        if mask is not None:
+            # Compute the keys and values for the heads
+            kv_heads = self.Wkv_b(kv)
+            k_nope, v = kv_heads.split([self.num_heads * self.qk_nope_head_dim, self.num_heads * self.v_head_dim], dim=-1)
+            k_nope = self.k_norm(k_nope.contiguous().view(batch_size, self.num_heads, kv_len, self.qk_nope_head_dim))
+            v = v.contiguous().view(batch_size, self.num_heads, kv_len, self.v_head_dim)
+            v = self.v_norm(v)
+            
+            # Concat the tensors
+            q = torch.cat([q_nope, q_rope], dim=-1)
+            k = torch.cat([k_nope, k_rope.expand(-1, self.num_heads, -1, -1)], dim=-1)
+
+            # Compute the indexer mask
+            indexer_indices, _, k_idx = self.indexer(x, new_kv, k_idx, mask)
+
+            # Compute the indexer mask
+            kv_mask = torch.full((batch_size, seq_len, kv_len), 0).scatter_(-1, indexer_indices, 1)
+            # Apply mask for causality
+            kv_mask = kv_mask.masked_fill(mask == 0, 0)
+            
+            # Compute the similarity scores
+            attn_weights, _ = self.attention(q, k, kv_mask)
+            v = attn_weights @ v
+            v = v.view(batch_size, kv_len, -1)
+
+        # MQA mode: Decoding/Inference. Only use agter a MHA mode; Please keep track of the cache.
+        else:
+            # Reshape the wieghts of the up projection matrix to project the queries to the same dimension as the latent keys
+            Wkv_b = self.Wkv_b.weight.view(self.num_heads, -1, self.kv_lora_dim)
+            q_nope = q_nope @ Wkv_b[:, :self.qk_nope_head_dim]
+
+            # Concat the tensors
+            q = torch.cat([q_nope, q_rope], dim=-1)
+            kv = kv.view(batch_size, 1, kv_len, -1)
+            k = torch.cat([kv, k_rope], dim=-1)
+
+            # Compute the indexer mask
+            indexer_indices, _, k_idx = self.indexer(x, new_kv, k_idx, mask)
+
+            # Compute the indexer mask
+            kv_mask = torch.full((batch_size, seq_len, kv_len), 0).scatter_(-1, indexer_indices, 1)
+            
+            # Compute the similarity scores
+            attn_weights, _ = self.attention(q, k, kv_mask)
+            v = attn_weights @ kv.view(batch_size, 1, kv_len, -1)
+
+            # Project the value to the right dimension
+            v = v @ (Wkv_b[:, -self.v_head_dim:].transpose(-1, -2))
+            # Reshape for output calculation
+            v = v.view(batch_size, seq_len, -1)
+
+        # Compute the output
+        o = self.W_o(v)
+        # Reshape k_rope for caching
+        k_rope = k_rope.view(batch_size, kv_len, self.qk_rope_dim)
+        kv = kv.view(batch_size, kv_len, self.kv_lora_dim)
+        
+        return o, kv, k_rope, k_idx, attn_weights, kv_mask
