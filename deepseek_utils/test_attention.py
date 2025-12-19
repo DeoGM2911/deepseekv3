@@ -28,8 +28,8 @@ def test_indexer():
     kv_2 = torch.rand((2, 4, 16))
     mask_1 = torch.randint(0, 2, (2, 3, 2))
     indexer.eval()
-    top_indices_1, top_scores_1, k_idx1 = indexer(x, kv_1, mask_1)
-    top_indices_2, top_scores_2, k_idx2 = indexer(x, kv_2, None, k_idx1)
+    top_indices_1, top_scores_1, k_idx1 = indexer(x, kv_1, None, mask_1)
+    top_indices_2, top_scores_2, k_idx2 = indexer(x, kv_2, k_idx1, None)
     print(mask_1)
     print("Less the k choices")
     print(top_indices_1)
@@ -60,7 +60,7 @@ def test_mla():
     mask = torch.randint(0, 2, (1, 3, 3))
     mla.eval()
     print("Test prefilling/training")
-    o, kv, k_rope, k_idx, _, kv_mask = mla(x, None, None, mask, None)
+    o, kv, k_rope, k_idx, _, kv_mask = mla(x, None, None, None, mask)
     print(kv)
     print(k_rope)
     print(k_idx)
@@ -74,7 +74,7 @@ def test_mla():
     x = torch.ones((1, 1, 4))
     for i in range(3):
         print(f"Step {i}")
-        o, kv, k_rope, k_idx, _, kv_mask = mla(x, kv, k_rope, None, k_idx)
+        o, kv, k_rope, k_idx, _, kv_mask = mla(x, kv, k_rope, k_idx, None)
         print(kv.shape)
         print(k_rope.shape)
         print(k_idx.shape)
@@ -82,9 +82,9 @@ def test_mla():
 
 
 if __name__ == "__main__":
-    # print("Test dot product attention")
-    # test_dot_prod_attention()
-    # print("Test indexer")
-    # test_indexer()
+    print("Test dot product attention")
+    test_dot_prod_attention()
+    print("Test indexer")
+    test_indexer()
     print("Test MLA")
     test_mla()

@@ -22,8 +22,7 @@ def test_decoder():
         moe_num_shared_experts=1,
         moe_num_experts=4,
         moe_k=2,
-        moe_router='linear',
-        moe_dropout=0.1
+        moe_router='linear'
     )
 
     x = torch.randn(2, 5, 4)

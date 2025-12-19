@@ -26,7 +26,6 @@ class ModelConfig:
     moe_num_experts: int = 256
     moe_k: int = 64
     moe_router: str = 'linear'
-    moe_dropout: float = 0.1
 
 
 class DeepSeekV3(nn.Module):
@@ -74,8 +73,7 @@ class DeepSeekV3(nn.Module):
                 config.moe_num_shared_experts,
                 config.moe_num_experts,
                 config.moe_k,
-                config.moe_router,
-                config.moe_dropout
+                config.moe_router
             )
             for i in range(config.num_layers)
         ])

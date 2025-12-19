@@ -40,7 +40,6 @@ class Decoder(nn.Module):
         moe_num_experts: the number of experts in the MoE
         moe_k: how many experts to use in the MoE
         moe_router: the router to use in the MoE
-        moe_dropout: the dropout rate in the MoE
     """
     def __init__(
         self,
@@ -62,8 +61,7 @@ class Decoder(nn.Module):
         moe_num_shared_experts,
         moe_num_experts,
         moe_k,
-        moe_router,
-        moe_dropout
+        moe_router
     ):
         super(Decoder, self).__init__()
         self.block_idx = block_idx
@@ -94,8 +92,7 @@ class Decoder(nn.Module):
                 moe_num_shared_experts,
                 moe_num_experts,
                 moe_k,
-                moe_router,
-                moe_dropout
+                moe_router
             )
         else:
             self.moe = MLP(input_dim, moe_hidden_dim, input_dim)

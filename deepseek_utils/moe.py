@@ -70,14 +70,12 @@ class MLP(nn.Module):
         self,
         input_dim,
         hidden_dim,
-        output_dim,
-        dropout=0.1
+        output_dim
     ):
         super(MLP, self).__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.hidden_dim = hidden_dim
-        self.dropout = nn.Dropout(dropout)
         self.ffn = nn.Sequential(
             SwiGLU(input_dim, hidden_dim),
             nn.Linear(hidden_dim, output_dim)
@@ -87,7 +85,7 @@ class MLP(nn.Module):
         self,
         x
     ):
-        return self.dropout(self.ffn(x))
+        return self.ffn(x)
 
 
 class MoE(nn.Module):
@@ -109,7 +107,6 @@ class MoE(nn.Module):
         num_experts: The number of experts
         k: how many experts to attend to
         router: type of router used. Either `linear` or `centroid`
-        dropout: dropout rate.
     """
     def __init__(
         self,
@@ -119,8 +116,7 @@ class MoE(nn.Module):
         num_shared_experts,
         num_experts,
         k,
-        router="linear",
-        dropout=0.1
+        router="linear"
     ):
         super(MoE, self).__init__()
         self.num_shared_experts = num_shared_experts
@@ -132,8 +128,7 @@ class MoE(nn.Module):
         self.shared_experts = MLP(
             input_dim, 
             hidden_dim, 
-            num_shared_experts * output_dim, 
-            dropout
+            num_shared_experts * output_dim
         )
 
         # The experts - SwiGLU activation
@@ -148,7 +143,6 @@ class MoE(nn.Module):
             self.router = nn.Linear(input_dim, num_experts)
         elif router == "centroid":
             self.router = CentroidRouter(input_dim, num_experts)
-        self.dropout = nn.Dropout(dropout)
     
     def forward(
         self,
@@ -177,5 +171,4 @@ class MoE(nn.Module):
         gate_weights = gate_weights.unsqueeze(-1)  # Shape: (batch_size, seq_len, num_experts + 1, 1)
         output = torch.sum(gate_weights * expert_outputs, dim=2)  # Shape: (batch_size, seq_len, output_dim)
         
-        output = self.dropout(output)
         return output, gate_logits, topk_indices

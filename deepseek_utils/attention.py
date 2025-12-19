@@ -33,11 +33,9 @@ class ScaledDotProductAttention(nn.Module):
     masking.
     """
     def __init__(
-        self,
-        dropout=0.1
+        self
     ):
         super(ScaledDotProductAttention, self).__init__()
-        self.dropout = nn.Dropout(dropout)
 
     def forward(
         self,
@@ -56,7 +54,6 @@ class ScaledDotProductAttention(nn.Module):
         if mask is not None:
             scores = scores.masked_fill(mask.unsqueeze(1) == 0, -1e9)
         attn_weights = F.softmax(scores, dim=-1)
-        attn_weights = self.dropout(attn_weights)
         
         return attn_weights, scores
 

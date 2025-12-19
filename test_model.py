@@ -23,8 +23,7 @@ def test_model():
         moe_num_shared_experts = 4,
         moe_num_experts = 8,
         moe_k = 2,
-        moe_router = 'linear',
-        moe_dropout = 0.1
+        moe_router = 'linear'
     )
 
     model = DeepSeekV3(config)
