@@ -75,18 +75,18 @@ class GRPO:
         self.optimizer = optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         self.criterion = GRPOLoss(self.kl_beta, self.num_output)
 
-    def _get_log_probs(self, model, questions, outputs, valid_lens):
+    def _get_log_probs(self, model, questions, outputs, mask):
         # For each token, compute the cumulative probability for the next token
         # Initial forward pass
-        logits, _, kv_cache, key_rope_cache = model(questions, cache=True, valid_lens=valid_lens)
+        logits, kv_cache, key_rope_cache, k_idx_cache, _, _, _, _, _, _ = model(questions, cache=True, mask=mask)
 
         # Get the cumulative probability for each token
         probs = torch.softmax(logits, dim=-1)
         scores = torch.log(torch.gather(probs, outputs[:, 0].view(probs.shape[0], -1), dim=-1))
 
         for i in range(1, outputs.shape[1]):
-            logits, _, kv_cache, key_rope_cache = model(outputs[:, i-1].view(questions.shape[0], -1), cache=True,
-                                                        kv_cache=kv_cache, key_rope_cache=key_rope_cache)
+            logits, kv_cache, key_rope_cache, k_idx_cache, _, _, _, _, _ = model(outputs[:, i-1].view(questions.shape[0], -1), cache=True,
+                                                        kv_cache=kv_cache, key_rope_cache=key_rope_cache, k_idx_cache=k_idx_cache)
             probs = torch.softmax(logits, dim=-1)
             next_probs = torch.gather(probs, outputs[:, i].view(probs.shape[0], -1), dim=-1)
             # Times 1 if it's pad token
@@ -109,25 +109,27 @@ class GRPO:
                 questions = questions.repeat(self.num_output, 1)
 
                 # Forward pass to get outputs
-                outputs, log_probs = self.model.generate(questions,
+                outputs, log_probs = generate(
+                                model=self.model,
+                                inputs=questions,
                                 decode_strat="beam", 
                                 max_new_tokens=1_000, 
-                                eos_token_id=vocab.eos_token_id, 
-                                pad_token_id=vocab.pad_token_id, 
+                                eos_token_id=self.vocab.eos_token_id, 
+                                pad_token_id=self.vocab.pad_token_id, 
                                 temperature=1.0, 
                                 top_k_or_beam_size=8, 
                                 include_prompt=False,
-                                valid_lens=valid_lens,
+                                mask=mask,
                                 do_sample=True
                 )
 
                 # Forward pass for old model
                 with torch.no_grad():
-                    old_log_probs = self._get_log_probs(self.old_model, questions, outputs, valid_lens)
+                    old_log_probs = self._get_log_probs(self.old_model, questions, outputs, mask)
 
                 # Forward pass to get ref outputs
                 with torch.no_grad():
-                    ref_log_probs = self._get_log_probs(self.ref_model, questions, outputs, valid_lens)
+                    ref_log_probs = self._get_log_probs(self.ref_model, questions, outputs, mask)
 
                 # Compute the rewards
                 with torch.no_grad():

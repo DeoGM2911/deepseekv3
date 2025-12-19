@@ -36,13 +36,19 @@ def test_model():
     # Forward pass
     print("Test no cache, training")
     mask = torch.randint(0, 2, (batch_size, seq_len, seq_len))
-    o, kv, k_rope, k_idx, attn_weights, kv_mask, gate_logits, topk_indices = model(x, mask=mask)
+    o, kv, k_rope, k_idx, attn_weights, unmasked_scores, indexer_indices, indexer_scores, gate_logits, topk_indices \
+        = model(x, mask=mask)
     print(torch.stack(gate_logits, dim=0).shape)
     print(torch.stack(topk_indices, dim=0).shape)
+    print(torch.stack(attn_weights, dim=0).shape)
+    print(torch.stack(unmasked_scores, dim=0).shape)
+    print(torch.stack(indexer_indices, dim=0).shape)
+    print(torch.stack(indexer_scores, dim=0).shape)
 
     print("Test cache, prefilling")
     mask = torch.randint(0, 2, (batch_size, seq_len, seq_len))
-    o, kv, k_rope, k_idx, attn_weights, kv_mask, gate_logits, topk_indices = model(x, cache=True, mask=mask, inference=True)
+    o, kv, k_rope, k_idx, attn_weights, unmasked_scores, indexer_indices, indexer_scores, gate_logits, topk_indices \
+        = model(x, cache=True, mask=mask, inference=True)
     print(kv.shape)
     print(k_rope.shape)
     print(k_idx.shape)
@@ -51,7 +57,7 @@ def test_model():
     x = torch.randint(0, config.vocab_size, (batch_size, 1))
     for i in range(3):
         print(f"Step {i}")
-        o, kv, k_rope, k_idx, attn_weights, kv_mask, gate_logits, topk_indices = \
+        o, kv, k_rope, k_idx, attn_weights, unmasked_scores, indexer_indices, indexer_scores, gate_logits, topk_indices = \
             model(x, cache=True, kv=kv, k_rope=k_rope, k_idx=k_idx, inference=True)
         print(kv.shape)
         print(k_rope.shape)

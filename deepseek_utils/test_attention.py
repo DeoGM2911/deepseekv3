@@ -8,9 +8,10 @@ def test_dot_prod_attention():
     mask = torch.randint(0, 2, (2, 2, 3))
     attention.eval()
     # With mask
-    attn_weights, scores = attention(q, k, mask)
+    attn_weights, unmasked_scores = attention(q, k, mask)
     print(mask)
     print(attn_weights)
+    print(unmasked_scores)
 
 
 def test_indexer():
@@ -60,25 +61,22 @@ def test_mla():
     mask = torch.randint(0, 2, (1, 3, 3))
     mla.eval()
     print("Test prefilling/training")
-    o, kv, k_rope, k_idx, _, kv_mask = mla(x, None, None, None, mask)
+    o, kv, k_rope, k_idx, _, _, _, _ = mla(x, None, None, None, mask)
     print(kv)
     print(k_rope)
     print(k_idx)
-    print(kv_mask)
     print(kv.shape)
     print(k_rope.shape)
     print(k_idx.shape)
-    print(kv_mask.shape)
     print("----------------------------")
     print("Test decode/inference")
     x = torch.ones((1, 1, 4))
     for i in range(3):
         print(f"Step {i}")
-        o, kv, k_rope, k_idx, _, kv_mask = mla(x, kv, k_rope, k_idx, None)
+        o, kv, k_rope, k_idx, _, _, _, _ = mla(x, kv, k_rope, k_idx, None)
         print(kv.shape)
         print(k_rope.shape)
         print(k_idx.shape)
-        print(kv_mask.shape)
 
 
 if __name__ == "__main__":

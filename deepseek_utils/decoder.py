@@ -112,7 +112,8 @@ class Decoder(nn.Module):
         #  Prelayer Norm
         x_norm = self.ln1(x)
         # MLA
-        x_mla, kv, k_rope, k_idx, attn_weights, kv_mask = self.mla(x_norm, kv, k_rope, k_idx, mask)
+        x_mla, kv, k_rope, k_idx, attn_weights, unmasked_scores, indexer_indices, indexer_scores = \
+            self.mla(x_norm, kv, k_rope, k_idx, mask)
         # Residual connection
         x = x_mla + x_norm
         
@@ -127,4 +128,5 @@ class Decoder(nn.Module):
         # Residual connection
         x = x_norm + x_moe
 
-        return x, kv, k_rope, k_idx, attn_weights, kv_mask, gate_logits, topk_indices
+        return x, kv, k_rope, k_idx, attn_weights, unmasked_scores, \
+                indexer_indices, indexer_scores, gate_logits, topk_indices

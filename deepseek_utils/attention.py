@@ -49,14 +49,14 @@ class ScaledDotProductAttention(nn.Module):
         """
         d_k = query.size(-1)
         scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
+        unmasked_scores = scores.clone()
 
         # Apply mask
         if mask is not None:
             scores = scores.masked_fill(mask.unsqueeze(1) == 0, -1e9)
         attn_weights = F.softmax(scores, dim=-1)
         
-        return attn_weights, scores
-
+        return attn_weights, unmasked_scores
 
 class Indexer(nn.Module):
     """
@@ -306,6 +306,9 @@ class MLA(nn.Module):
         # Variables meant to be returned
         kv_mask = None
         attn_weights = None
+        indexer_scores = None
+        indexer_indices = None
+        unmasked_scores = None
         
         # MHA mode: Prefill/Training. Expect a mask to be provided. Here, seq_len = kv_len
         if mask is not None:
@@ -321,7 +324,7 @@ class MLA(nn.Module):
             k = torch.cat([k_nope, k_rope.expand(-1, self.num_heads, -1, -1)], dim=-1)
 
             # Compute the indexer mask
-            indexer_indices, _, k_idx = self.indexer(x, new_kv, k_idx, mask)
+            indexer_indices, indexer_scores, k_idx = self.indexer(x, new_kv, k_idx, mask)
 
             # Compute the indexer mask
             kv_mask = torch.full((batch_size, seq_len, kv_len), 0).scatter_(-1, indexer_indices, 1)
@@ -329,7 +332,7 @@ class MLA(nn.Module):
             kv_mask = kv_mask.masked_fill(mask == 0, 0)
             
             # Compute the similarity scores
-            attn_weights, _ = self.attention(q, k, kv_mask)
+            attn_weights, unmasked_scores = self.attention(q, k, kv_mask)
             v = attn_weights @ v
             v = v.view(batch_size, kv_len, -1)
 
@@ -345,13 +348,13 @@ class MLA(nn.Module):
             k = torch.cat([kv, k_rope], dim=-1)
 
             # Compute the indexer mask
-            indexer_indices, _, k_idx = self.indexer(x, new_kv, k_idx, mask)
+            indexer_indices, indexer_scores, k_idx = self.indexer(x, new_kv, k_idx, mask)
 
             # Compute the indexer mask
             kv_mask = torch.full((batch_size, seq_len, kv_len), 0).scatter_(-1, indexer_indices, 1)
             
             # Compute the similarity scores
-            attn_weights, _ = self.attention(q, k, kv_mask)
+            attn_weights, unmasked_scores = self.attention(q, k, kv_mask)
             v = attn_weights @ kv.view(batch_size, 1, kv_len, -1)
 
             # Project the value to the right dimension
@@ -365,4 +368,4 @@ class MLA(nn.Module):
         k_rope = k_rope.view(batch_size, kv_len, self.qk_rope_dim)
         kv = kv.view(batch_size, kv_len, self.kv_lora_dim)
         
-        return o, kv, k_rope, k_idx, attn_weights, kv_mask
+        return o, kv, k_rope, k_idx, attn_weights, unmasked_scores, indexer_indices, indexer_scores

@@ -113,22 +113,30 @@ class DeepSeekV3(nn.Module):
             gate_logits = []
             topk_indices = []
             attn_weights = []
-            kv_mask = []
+            unmasked_scores = []
+            indexer_indices = []
+            indexer_scores = []
         else:
             gate_logits = None
             topk_indices = None
             attn_weights = None
-            kv_mask = None
+            unmasked_scores = None
+            indexer_indices = None
+            indexer_scores = None
 
         # Decoder
         for i, decoder in enumerate(self.decoders):
-            x, blk_kv, blk_k_rope, blk_k_idx, blk_attn_weights, blk_kv_mask, blk_gate_logits, blk_topk_indices \
+            x, blk_kv, blk_k_rope, blk_k_idx, blk_attn_weights, \
+                blk_unmasked_scores, blk_indexer_indices, blk_indexer_scores, \
+                blk_gate_logits, blk_topk_indices \
             = decoder(x, kv_list[i], k_rope_list[i], k_idx_list[i], mask)
 
             # For calculate auxiliary loss
             if not inference:
                 attn_weights.append(blk_attn_weights)
-                kv_mask.append(blk_kv_mask)
+                unmasked_scores.append(blk_unmasked_scores)
+                indexer_indices.append(blk_indexer_indices)
+                indexer_scores.append(blk_indexer_scores)
                 # Only collect for MoE layers
                 if i > self.config.num_dense_layers:
                     gate_logits.append(blk_gate_logits)
@@ -147,4 +155,5 @@ class DeepSeekV3(nn.Module):
         
         # Output
         x = self.output(x)
-        return x, new_kv, new_k_rope, new_k_idx, attn_weights, kv_mask, gate_logits, topk_indices
+        return x, new_kv, new_k_rope, new_k_idx, attn_weights, unmasked_scores, \
+            indexer_indices, indexer_scores, gate_logits, topk_indices
