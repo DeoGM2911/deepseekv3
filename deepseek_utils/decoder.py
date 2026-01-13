@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from .attention import MLA
 from .moe import MoE, MLP
+from .utils import RMSNorm
 
 
 class Decoder(nn.Module):
@@ -98,8 +99,8 @@ class Decoder(nn.Module):
             self.moe = MLP(input_dim, moe_hidden_dim, input_dim)
 
         # Residual pre-Layer Norm
-        self.ln1 = nn.LayerNorm(input_dim)
-        self.ln2 = nn.LayerNorm(input_dim)
+        self.ln1 = RMSNorm(input_dim)
+        self.ln2 = RMSNorm(input_dim)
 
     def forward(
         self,

@@ -58,3 +58,24 @@ def rotary_emb(
     ], dim=-1)
     
     return x_rotated
+
+
+class RMSNorm(nn.Module):
+    """
+    Layer Normalization with Root Mean Square
+    """
+    def __init__(
+        self,
+        normalized_shape
+    ):
+        super(RMSNorm, self).__init__()
+        self.normalized_shape = normalized_shape
+        self.dims = -1 if isinstance(normalized_shape, int) else tuple([-i for i in range(1, len(normalized_shape) + 1)])
+        self.gamma = nn.Parameter(torch.ones(normalized_shape))
+        self.beta = nn.Parameter(torch.zeros(normalized_shape))
+    
+    def forward(
+        self,
+        x
+    ):
+        return x / torch.sqrt(torch.mean(x**2, dim=self.dims, keepdim=True) + 1e-8) * self.gamma + self.beta
